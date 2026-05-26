@@ -73,4 +73,97 @@ router.get("/:id", async (req, res, next) => {
   }
 });
 
+router.get("/:id/analytics", async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    validateAccountId(id);
+
+    const account = await server.loadAccount(id);
+
+    const txResponse = await server
+      .transactions()
+      .forAccount(id)
+      .limit(100)
+      .order("desc")
+      .call();
+
+    const transactions = txResponse.records;
+
+    let totalSent = 0;
+    let totalReceived = 0;
+
+    const assetUsage = {};
+    let firstSeen = null;
+    let lastSeen = null;
+
+    for (const tx of transactions) {
+      const createdAt = new Date(tx.created_at);
+
+      if (!firstSeen || createdAt < firstSeen) firstSeen = createdAt;
+      if (!lastSeen || createdAt > lastSeen) lastSeen = createdAt;
+
+      const ops = await server.operations().forTransaction(tx.id).call();
+
+      for (const op of ops.records) {
+        const amount = parseFloat(op.amount || 0);
+
+        // SENT
+        if (op.from === id) {
+          totalSent += amount;
+
+          if (op.asset_code) {
+            const key = `${op.asset_code}:${op.asset_issuer}`;
+            assetUsage[key] = (assetUsage[key] || 0) + 1;
+          }
+        }
+
+        // RECEIVED
+        if (op.to === id) {
+          totalReceived += amount;
+
+          if (op.asset_code) {
+            const key = `${op.asset_code}:${op.asset_issuer}`;
+            assetUsage[key] = (assetUsage[key] || 0) + 1;
+          }
+        }
+      }
+    }
+
+    // Convert asset usage into sorted array
+    const topAssets = Object.entries(assetUsage)
+      .map(([key, count]) => {
+        const [assetCode, assetIssuer] = key.split(":");
+        return {
+          assetCode,
+          assetIssuer,
+          usageCount: count,
+        };
+      })
+      .sort((a, b) => b.usageCount - a.usageCount)
+      .slice(0, 10);
+
+    // Avg transactions per day
+    const days =
+      firstSeen && lastSeen
+        ? Math.max(
+            1,
+            Math.ceil((lastSeen - firstSeen) / (1000 * 60 * 60 * 24))
+          )
+        : 1;
+
+    const avgTransactionsPerDay = transactions.length / days;
+
+    return success(res, {
+      totalSent: totalSent.toFixed(7),
+      totalReceived: totalReceived.toFixed(7),
+      topAssets,
+      avgTransactionsPerDay: Number(avgTransactionsPerDay.toFixed(2)),
+      firstSeen,
+      lastSeen,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;
